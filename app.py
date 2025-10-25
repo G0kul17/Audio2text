@@ -2,7 +2,16 @@ import streamlit as st
 import whisper
 import os
 import tempfile
-import sounddevice as sd
+# sounddevice depends on the PortAudio native library which is not available
+# in many cloud deployments (Streamlit Cloud, Spaces). Import it conditionally
+# and fall back to upload-only UI when it's missing.
+has_sounddevice = False
+try:
+    import sounddevice as sd
+    has_sounddevice = True
+except Exception:
+    sd = None
+    has_sounddevice = False
 import soundfile as sf
 import numpy as np
 import shutil
@@ -251,125 +260,161 @@ with tab1:
 with tab2:
     st.subheader("Record Audio from Microphone")
 
-    # We record until the user stops. Use a Start / Stop button and store
-    # recording state in session_state so the stream can run in the background.
-    if 'is_recording' not in st.session_state:
-        st.session_state.is_recording = False
-    if 'rec_samplerate' not in st.session_state:
-        st.session_state.rec_samplerate = 16000
-    if 'rec_stream' not in st.session_state:
-        st.session_state.rec_stream = None
-    if 'last_record_path' not in st.session_state:
-        st.session_state.last_record_path = None
+    # If sounddevice / PortAudio is not available (common on cloud), show
+    # a friendly message and offer upload fallback. This avoids an import-time
+    # OSError and allows the app to run on Streamlit Cloud / Spaces.
+    if not has_sounddevice:
+        st.warning(
+            "Microphone recording is not available on this deployment because the PortAudio native library is missing."
+        )
+        st.info("You can either: (1) Upload an audio file in the Upload tab, or (2) run the app locally to use the microphone.")
 
-    # We'll create a queue per-recording and a callback closure when starting
-    # the stream. Avoid touching Streamlit session_state from the audio
-    # callback thread; instead the callback will put frames into a Queue and
-    # the main thread will drain it when stopping.
-
-    col1, col2 = st.columns([1, 1])
-    with col1:
-        if not st.session_state.is_recording:
-            if st.button("🔴 Start Recording", key="start_record"):
-                # start recording
-                st.session_state.rec_samplerate = 16000
-                try:
-                    q = Queue()
-
-                    def _audio_callback(indata, frames, time_info, status):
-                        # copy the buffer and push to queue
-                        try:
-                            q.put(indata.copy(), block=False)
-                        except Exception:
-                            pass
-
-                    stream = sd.InputStream(samplerate=st.session_state.rec_samplerate,
-                                             channels=1,
-                                             dtype='float32',
-                                             callback=_audio_callback)
-                    stream.start()
-                    st.session_state.rec_stream = stream
-                    st.session_state.rec_queue = q
-                    st.session_state.is_recording = True
-                    st.success("Recording started. Click Stop when finished.")
-                except Exception as e:
-                    st.error(f"Could not start recording: {e}")
-        else:
-            if st.button("⏹️ Stop Recording", key="stop_record"):
-                # stop and save
-
-                try:
-                    stream = st.session_state.rec_stream
-                    q = st.session_state.rec_queue if 'rec_queue' in st.session_state else None
-                    if stream is not None:
-                        stream.stop()
-                        stream.close()
-                except Exception:
-                    pass
-
-                # give callback a moment to flush
-                time.sleep(0.1)
-
-                frames = []
-                if q is not None:
-                    while not q.empty():
-                        try:
-                            frames.append(q.get(block=False))
-                        except Exception:
-                            break
-
-                if frames:
-                    audio_np = np.concatenate(frames, axis=0)
-                else:
-                    audio_np = np.empty((0,1), dtype='float32')
-
-                # Save to temp file
-                with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp_file:
-                    try:
-                        sf.write(tmp_file.name, audio_np, st.session_state.rec_samplerate)
-                        st.session_state.last_record_path = tmp_file.name
-                    except Exception as e:
-                        st.error(f"Failed to save recording: {e}")
-
-                st.session_state.is_recording = False
-                st.success("✅ Recording completed!")
-
-    with col2:
-        if st.session_state.last_record_path:
-            st.audio(st.session_state.last_record_path, format="audio/wav")
-            # Transcribe button
-            if st.button("🎯 Transcribe Recording", key="transcribe_record"):
-                # Load model if not already loaded
+        # Provide an inline uploader so users on cloud can still attach recorded files
+        uploaded_record = st.file_uploader("Or upload a recorded audio file to transcribe", type=["wav","mp3","m4a","ogg","flac"]) 
+        if uploaded_record is not None:
+            st.audio(uploaded_record, format=f"audio/{uploaded_record.name.split('.')[-1]}")
+            if st.button("🎯 Transcribe Uploaded Recording", key="transcribe_uploaded_record"):
+                # Load model if needed
                 if st.session_state.model is None or st.session_state.current_model_size != model_size:
                     st.session_state.model = load_model(model_size)
                     st.session_state.current_model_size = model_size
 
-                progress_bar = st.progress(0)
-                status_text = st.empty()
-                status_text.text("Transcribing recording... Please wait.")
-                progress_bar.progress(50)
+                # Save and transcribe
+                with tempfile.NamedTemporaryFile(delete=False, suffix=f".{uploaded_record.name.split('.')[-1]}") as tmp_file:
+                    tmp_file.write(uploaded_record.getvalue())
+                    tmp_path = tmp_file.name
+                try:
+                    progress = st.progress(0)
+                    progress.progress(30)
+                    start_time = time.time()
+                    transcription, detected_lang = transcribe_audio(tmp_path, st.session_state.model, language if language != "auto" else None)
+                    end_time = time.time()
+                    progress.progress(100)
+                    if transcription:
+                        st.success(f"✅ Transcription completed in {end_time - start_time:.2f} seconds!")
+                        if detected_lang:
+                            st.info(f"🌐 Detected Language: {detected_lang}")
+                        st.subheader("📝 Transcription:")
+                        st.text_area("Transcribed Text", transcription, height=200, label_visibility="collapsed")
+                        st.download_button(label="⬇️ Download Transcription", data=transcription,
+                                           file_name=f"transcription_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
+                                           mime="text/plain")
+                finally:
+                    if os.path.exists(tmp_path):
+                        os.unlink(tmp_path)
+        # End of cloud fallback
+    else:
+        # Original server-side recording flow (sounddevice)
+        # We record until the user stops. Use a Start / Stop button and store
+        # recording state in session_state so the stream can run in the background.
+        if 'is_recording' not in st.session_state:
+            st.session_state.is_recording = False
+        if 'rec_samplerate' not in st.session_state:
+            st.session_state.rec_samplerate = 16000
+        if 'rec_stream' not in st.session_state:
+            st.session_state.rec_stream = None
+        if 'last_record_path' not in st.session_state:
+            st.session_state.last_record_path = None
 
-                start_time = time.time()
-                transcription, detected_lang = transcribe_audio(
-                    st.session_state.last_record_path,
-                    st.session_state.model,
-                    language if language != "auto" else None
-                )
-                end_time = time.time()
+        col1, col2 = st.columns([1, 1])
+        with col1:
+            if not st.session_state.is_recording:
+                if st.button("🔴 Start Recording", key="start_record"):
+                    # start recording
+                    st.session_state.rec_samplerate = 16000
+                    try:
+                        q = Queue()
 
-                progress_bar.progress(100)
-                status_text.empty()
-                progress_bar.empty()
+                        def _audio_callback(indata, frames, time_info, status):
+                            try:
+                                q.put(indata.copy(), block=False)
+                            except Exception:
+                                pass
 
-                if transcription:
-                    st.success(f"✅ Transcription completed in {end_time - start_time:.2f} seconds!")
-                    if detected_lang:
-                        st.info(f"🌐 Detected Language: {detected_lang}")
-                    st.subheader("📝 Transcription:")
-                    st.text_area("Transcribed Text", transcription, height=200, label_visibility="collapsed")
-                    st.download_button(label="⬇️ Download Transcription", data=transcription,
-                                       file_name=f"transcription_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
-                                       mime="text/plain")
+                        stream = sd.InputStream(samplerate=st.session_state.rec_samplerate,
+                                                 channels=1,
+                                                 dtype='float32',
+                                                 callback=_audio_callback)
+                        stream.start()
+                        st.session_state.rec_stream = stream
+                        st.session_state.rec_queue = q
+                        st.session_state.is_recording = True
+                        st.success("Recording started. Click Stop when finished.")
+                    except Exception as e:
+                        st.error(f"Could not start recording: {e}")
+            else:
+                if st.button("⏹️ Stop Recording", key="stop_record"):
+                    # stop and save
+                    try:
+                        stream = st.session_state.rec_stream
+                        q = st.session_state.rec_queue if 'rec_queue' in st.session_state else None
+                        if stream is not None:
+                            stream.stop()
+                            stream.close()
+                    except Exception:
+                        pass
+
+                    time.sleep(0.1)
+
+                    frames = []
+                    if q is not None:
+                        while not q.empty():
+                            try:
+                                frames.append(q.get(block=False))
+                            except Exception:
+                                break
+
+                    if frames:
+                        audio_np = np.concatenate(frames, axis=0)
+                    else:
+                        audio_np = np.empty((0,1), dtype='float32')
+
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp_file:
+                        try:
+                            sf.write(tmp_file.name, audio_np, st.session_state.rec_samplerate)
+                            st.session_state.last_record_path = tmp_file.name
+                        except Exception as e:
+                            st.error(f"Failed to save recording: {e}")
+
+                    st.session_state.is_recording = False
+                    st.success("✅ Recording completed!")
+
+        with col2:
+            if st.session_state.last_record_path:
+                st.audio(st.session_state.last_record_path, format="audio/wav")
+                # Transcribe button
+                if st.button("🎯 Transcribe Recording", key="transcribe_record"):
+                    # Load model if not already loaded
+                    if st.session_state.model is None or st.session_state.current_model_size != model_size:
+                        st.session_state.model = load_model(model_size)
+                        st.session_state.current_model_size = model_size
+
+                    progress_bar = st.progress(0)
+                    status_text = st.empty()
+                    status_text.text("Transcribing recording... Please wait.")
+                    progress_bar.progress(50)
+
+                    start_time = time.time()
+                    transcription, detected_lang = transcribe_audio(
+                        st.session_state.last_record_path,
+                        st.session_state.model,
+                        language if language != "auto" else None
+                    )
+                    end_time = time.time()
+
+                    progress_bar.progress(100)
+                    status_text.empty()
+                    progress_bar.empty()
+
+                    if transcription:
+                        st.success(f"✅ Transcription completed in {end_time - start_time:.2f} seconds!")
+                        if detected_lang:
+                            st.info(f"🌐 Detected Language: {detected_lang}")
+                        st.subheader("📝 Transcription:")
+                        st.text_area("Transcribed Text", transcription, height=200, label_visibility="collapsed")
+                        st.download_button(label="⬇️ Download Transcription", data=transcription,
+                                           file_name=f"transcription_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
+                                           mime="text/plain")
 
 # Footer
 st.markdown("---")
