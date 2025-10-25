@@ -1,0 +1,33 @@
+# Core dependencies for Streamlit and Transformers
+streamlit==1.28.0
+transformers==4.35.0
+
+# Audio processing libraries
+librosa==0.10.1
+soundfile==0.12.1
+sounddevice==0.4.6
+scipy==1.11.4
+
+# Additional utilities
+numpy==1.24.3
+Pillow==10.1.0
+accelerate==0.24.1
+
+# Optional: For better performance
+sentencepiece==0.1.99
+protobuf==3.20.3
+
+# Core dependencies
+streamlit==1.28.0
+transformers==4.35.0
+
+# Audio processing
+librosa==0.10.1
+soundfile==0.12.1
+sounddevice==0.4.6
+scipy==1.11.4
+
+# Additional utilities
+numpy==1.24.3
+Pillow==10.1.0
+accelerate==0.24.1

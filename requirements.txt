@@ -1,0 +1,7 @@
+# Project dependencies for Speech-to-Text app
+# Note: Please install ffmpeg separately and ensure it's in your PATH for audio handling.
+streamlit
+openai-whisper
+sounddevice
+soundfile
+numpy
