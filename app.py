@@ -271,11 +271,18 @@ with tab2:
     # If sounddevice / PortAudio is not available (common on cloud), show
     # a friendly message and offer upload fallback. This avoids an import-time
     # OSError and allows the app to run on Streamlit Cloud / Spaces.
-    if not has_sounddevice:
+    # If server-side recording (PortAudio) is missing but a browser recorder
+    # is available, prefer the browser recorder and avoid showing a scary
+    # warning message. Only show the warning when neither server nor
+    # browser recording is available.
+    if not has_sounddevice and not has_browser_recorder:
         st.warning(
             "Microphone recording is not available on this deployment because the PortAudio native library is missing."
         )
         st.info("You can either: (1) Upload an audio file in the Upload tab, or (2) run the app locally to use the microphone.")
+    elif not has_sounddevice and has_browser_recorder:
+        # Informational note only — the browser recorder below will work.
+        st.info("Server-side microphone access is not available, but you can record directly in your browser using the recorder below.")
 
         # Browser-based recorder (preferred) — records in the user's browser and
         # returns WAV bytes, no PortAudio required on the server.
