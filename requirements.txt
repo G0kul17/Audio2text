@@ -5,3 +5,4 @@ openai-whisper
 sounddevice
 soundfile
 numpy
+streamlit-audiorecorder

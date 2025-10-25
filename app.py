@@ -12,6 +12,14 @@ try:
 except Exception:
     sd = None
     has_sounddevice = False
+# Try to import a browser-based recorder component (works on Streamlit Cloud/Spaces)
+has_browser_recorder = False
+try:
+    from streamlit_audiorecorder import st_audiorecorder
+    has_browser_recorder = True
+except Exception:
+    st_audiorecorder = None
+    has_browser_recorder = False
 import soundfile as sf
 import numpy as np
 import shutil
@@ -268,6 +276,43 @@ with tab2:
             "Microphone recording is not available on this deployment because the PortAudio native library is missing."
         )
         st.info("You can either: (1) Upload an audio file in the Upload tab, or (2) run the app locally to use the microphone.")
+
+        # Browser-based recorder (preferred) — records in the user's browser and
+        # returns WAV bytes, no PortAudio required on the server.
+        if has_browser_recorder:
+            st.markdown("**Record in your browser**")
+            try:
+                audio_bytes = st_audiorecorder("Click to record", key="browser_rec")
+            except Exception:
+                audio_bytes = None
+
+            if audio_bytes:
+                # write bytes to temp file and transcribe
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp_file:
+                    tmp_file.write(audio_bytes)
+                    tmp_path = tmp_file.name
+                try:
+                    if st.session_state.model is None or st.session_state.current_model_size != model_size:
+                        st.session_state.model = load_model(model_size)
+                        st.session_state.current_model_size = model_size
+                    progress = st.progress(0)
+                    progress.progress(20)
+                    start_time = time.time()
+                    transcription, detected_lang = transcribe_audio(tmp_path, st.session_state.model, language if language != "auto" else None)
+                    end_time = time.time()
+                    progress.progress(100)
+                    if transcription:
+                        st.success(f"✅ Transcription completed in {end_time - start_time:.2f} seconds!")
+                        if detected_lang:
+                            st.info(f"🌐 Detected Language: {detected_lang}")
+                        st.subheader("📝 Transcription:")
+                        st.text_area("Transcribed Text", transcription, height=200, label_visibility="collapsed")
+                        st.download_button(label="⬇️ Download Transcription", data=transcription,
+                                           file_name=f"transcription_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
+                                           mime="text/plain")
+                finally:
+                    if os.path.exists(tmp_path):
+                        os.unlink(tmp_path)
 
         # Provide an inline uploader so users on cloud can still attach recorded files
         uploaded_record = st.file_uploader("Or upload a recorded audio file to transcribe", type=["wav","mp3","m4a","ogg","flac"]) 
